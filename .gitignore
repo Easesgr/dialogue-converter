@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.build-venv/
+build/
+dist/
+backups/
+PACKAGING_STATUS.md
+*.log
+.env
+.env.*
+!.env.example
+*.p12
+*.key
+*.mobileprovision

@@ -1,0 +1,30 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Core and packaging tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Swift typecheck
+        run: xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macosx14.0 -typecheck Models.swift main.swift
+      - uses: actions/cache@v4
+        with:
+          path: build/downloads
+          key: pythonorg-3.14.3-macos11-50b709f7
+      - name: Prepare private build runtime
+        run: python3 packaging/bootstrap_python.py
+      - name: Build and verify portable application
+        run: python3 build_app.py --arch arm64
