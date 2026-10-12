@@ -106,4 +106,4 @@ jobs:
           sha256sum -c SHA256SUMS
           cd ..
           gh release create "$GITHUB_REF_NAME" release/*.dmg release/*.zip release/SHA256SUMS \
-            --verify-tag --title "对话转换器 ${GITHUB_REF_NAME#v}" --notes-file docs/RELEASE_NOTES.md
+            --verify-tag --prerelease --title "对话转换器 ${GITHUB_REF_NAME#v} · 原生转换预览" --notes-file docs/RELEASE_NOTES.md

@@ -1,11 +1,18 @@
 # Contributing
 
-The product is a converter and handoff utility. Keep chat, model execution and original session ownership in the provider's application.
+The product converts native conversation records. Keep model execution and conversation continuation in the original applications.
 
-1. Inspect the relevant adapter, caller and fixtures before changing transcript handling.
-2. Use synthetic or carefully redacted examples. Never add real histories, credentials, private reasoning, machine-specific paths or build outputs.
-3. Preserve the delivery invariants in [FORMAT_NOTES.md](FORMAT_NOTES.md). Preparing or copying a packet must not acknowledge it.
-4. Run `python3 -m unittest discover -s tests -v` for core changes. On macOS also run the Swift typecheck and bundle checks in [docs/BUILD.md](docs/BUILD.md).
-5. Explain the observed format, behavior change and actual validation in the PR. For UI changes include a screenshot made with `--demo`.
+Use synthetic fixtures. Do not commit real conversations, credentials, application profiles, imported ZIPs or environment files.
 
-Use Python's standard library for runtime logic. Maintainer build dependencies are pinned separately in `requirements-build.txt`. Avoid adding model calls or automatic message submission to the converter.
+Before changing an adapter, inspect the corresponding format and callers, preserve source files, and test roles, ordering, full text, privacy filters and failure behavior. Do not weaken format checks or silently fall back to summaries or clipboard prompts.
+
+Run:
+
+~~~bash
+python3 -m unittest discover -s tests -v
+xcrun swiftc -swift-version 5 -parse-as-library -typecheck Models.swift main.swift
+~~~
+
+With a compatible Codex desktop installed, run python3 scripts/check_native_import.py to exercise the actual native importer in isolated profiles. No model requests are made.
+
+See [BUILD.md](docs/BUILD.md) for packaging and [FORMAT_NOTES.md](FORMAT_NOTES.md) for native compatibility limits. Report the exact app/CLI version and a minimal synthetic reproducer when possible.

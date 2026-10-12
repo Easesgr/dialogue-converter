@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only native transcript adapters and explicitly acknowledged handoffs.
+"""Local transcript adapters and native conversation conversion.
 
-One JSON request on stdin, one JSON response on stdout. No model, network,
-subprocess, native-history writes, or GUI automation is performed here.
+One JSON request on stdin, one JSON response on stdout. Source histories remain
+read-only. Native Codex imports use the installed app's app-server protocol.
 """
 from __future__ import annotations
 
@@ -67,6 +67,7 @@ class Transcript:
     modified_ns: int = 0
     sidechain: bool = False
     sampled: bool = False
+    surface: str = ""
     _identities: dict = field(default_factory=dict, repr=False)
     _origins: list = field(default_factory=list, repr=False)
     _last_origin: str = ""
@@ -125,6 +126,7 @@ class Transcript:
             "cwd": self.cwd, "path": self.path or "",
             "updated_at": datetime.fromtimestamp(self.modified_ns / 1e9, timezone.utc).isoformat() if self.modified_ns else "",
             "complete": self.complete,
+            "surface": self.surface or ("codex" if self.provider == "gpt" else "code"),
             "message_count": (-1 if self.sampled else len(self.messages)) if count is None else count,
         }
 
@@ -133,6 +135,9 @@ def consume(record, doc):
     if not isinstance(record, dict):
         return
     kind = record.get("type")
+    if kind == "custom-title" and isinstance(record.get("customTitle"), str):
+        doc.title = record["customTitle"]
+        return
     payload = record.get("payload")
     if not isinstance(payload, dict):
         payload = {}
@@ -149,7 +154,7 @@ def consume(record, doc):
         if record.get("isSidechain"):
             doc.sidechain = True
             return
-        if record.get("isMeta"):
+        if record.get("isMeta") or record.get("isCompactSummary"):
             return
         message = record["message"]
         role = message.get("role")
@@ -397,10 +402,12 @@ def write_json(path, value):
 
 
 class Bridge:
-    def __init__(self, data_dir=None, codex_home=None, claude_home=None):
+    def __init__(self, data_dir=None, codex_home=None, claude_home=None, cowork_home=None):
         self.root = Path(data_dir) if data_dir else Path.home() / "Library/Application Support/DialogueConverter"
         self.codex = Path(codex_home) if codex_home else Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
         self.claude = Path(claude_home) if claude_home else Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+        self.cowork = Path(cowork_home) if cowork_home else None
+        self.autodiscover_cowork = claude_home is None
 
     @contextmanager
     def locked(self):
@@ -447,7 +454,7 @@ class Bridge:
     def list_sessions(self):
         index = self.index()
         candidates = []
-        warnings = ["Claude Desktop / Cowork 未提供可读取的完整原生对话文件；请导出或粘贴可见对话。列表中的 Claude 会话来自本机 Claude Code。"]
+        warnings = []
         for provider, roots in (("gpt", (self.codex / "sessions", self.codex / "archived_sessions")),
                                 ("claude", (self.claude / "projects",))):
             paths = []
@@ -501,9 +508,14 @@ class Bridge:
             write_json(cache_path, updated)
         if incomplete_counts:
             warnings.append("较大的会话仅快速读取开头和末尾；message_count=-1 表示待加载后统计。")
-        return {"sessions": sorted(sessions.values(), key=lambda item: item["updated_at"], reverse=True), "warnings": warnings}
+        from native_sessions import discover_cowork
+        cowork, notices = discover_cowork(self)
+        return {"sessions": sorted([*sessions.values(), *cowork], key=lambda item: item["updated_at"], reverse=True), "warnings": warnings + notices}
 
     def load_document(self, path, provider=None):
+        if Path(path).name.startswith("local_") and Path(path).suffix == ".json":
+            from native_sessions import read_cowork
+            return read_cowork(path)
         doc = read_transcript(path, provider)
         if not doc.messages:
             raise ValueError("未找到可见的用户或助手消息。工具输出、系统消息和私有推理不会导入。")
@@ -712,6 +724,9 @@ class Bridge:
         if not isinstance(request, dict):
             raise ValueError("请求必须是 JSON 对象。")
         action = request.get("action")
+        if isinstance(action, str) and action.startswith("native_"):
+            from native_sessions import dispatch
+            return dispatch(self, request)
         if action == "list":
             return self.list_sessions()
         if action in ("prepare", "mark", "load", "status", "probe", "history", "read_packet"):
@@ -815,7 +830,8 @@ def main():
             raise ValueError("请求必须是 JSON 对象。")
         app = Bridge(data_dir=directory_option(request, "data_dir"),
                      codex_home=directory_option(request, "codex_home"),
-                     claude_home=directory_option(request, "claude_home"))
+                     claude_home=directory_option(request, "claude_home"),
+                     cowork_home=directory_option(request, "cowork_home"))
         result = {"ok": True, **app.handle(request)}
         code = 0
     except (ValueError, OSError, UnicodeError, TypeError, KeyError) as error:

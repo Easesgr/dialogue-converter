@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a relocated macOS bundle, its dependencies and isolated handoff flow."""
+"""Verify a relocated macOS bundle, dependencies and native format conversion."""
 from __future__ import annotations
 
 import argparse
@@ -141,9 +141,19 @@ def verify(app, arch):
         reopened = request({"action": "read_packet", "packet_id": prepared["packet_id"]})
         assert reopened["full_text"] == prepared["full_text"] and reopened["marked"]
         assert len(request({"action": "history"})["history"]) == 3
+        native = request({"action": "native_prepare", "source_path": str(g), "target_provider": "claude", "project": str(root)})["conversion"]
+        assert native["state"] == "exported"
+        import zipfile
+        with zipfile.ZipFile(native["artifact_path"]) as archive:
+            manifest = json.loads(archive.read("claude-3p-export.json"))
+            assert manifest["counts"] == {"cowork": 1, "code": 0, "chat": 0}
+            transcript, = [name for name in archive.namelist() if name.endswith(".jsonl")]
+            assert "实施结果：验证通过" in archive.read(transcript).decode()
+        assert request({"action": "native_preview", "source_path": str(g)})["message_count"] > 0
+        assert len(request({"action": "native_history"})["conversions"]) == 1
         request({"action": "unknown"}, expected_ok=False)
     return {"version": info["CFBundleShortVersionString"], "arch": arch, "verified_native_binaries": binary_count,
-            "relocated_minimal_path": True, "bidirectional_handoff": True,
+            "relocated_minimal_path": True, "native_cowork_export": True,
             "average_helper_seconds": round(sum(timings) / len(timings), 3)}
 
 

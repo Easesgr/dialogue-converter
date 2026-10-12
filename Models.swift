@@ -5,7 +5,7 @@ import SwiftUI
 enum Provider: String, CaseIterable, Identifiable {
     case claude, gpt
     var id: String { rawValue }
-    var title: String { self == .claude ? "Claude" : "Codex / GPT" }
+    var title: String { self == .claude ? "Claude Cowork" : "Codex" }
     var other: Provider { self == .claude ? .gpt : .claude }
     var color: Color { self == .claude ? Color(red: 0.66, green: 0.36, blue: 0.24) : Color(red: 0.18, green: 0.40, blue: 0.33) }
     var appPreference: String { self == .claude ? "claudeAppPath" : "codexAppPath" }
@@ -21,56 +21,37 @@ struct NativeSession: Decodable, Identifiable {
     let updated_at: String
     let complete: Bool
     let message_count: Int
+    let surface: String?
     var pickerTitle: String { "\(title.prefix(45)) · \(id.prefix(8))" }
 }
 
-struct PacketHistory: Decodable, Identifiable {
-    let packet_id: String
+struct ConversionRecord: Decodable, Identifiable {
+    let id: String
     let created_at: String
-    let source: NativeSession?
-    let target: NativeSession?
-    let source_provider: String
+    let source: NativeSession
     let target_provider: String
-    let new_message_count: Int
-    let valid: Bool
-    let marked: Bool
-    var id: String { packet_id }
-    var title: String { source?.title ?? "粘贴 / 导入的对话" }
-    var direction: String { "\(Provider(rawValue: source_provider)?.title ?? source_provider) → \(Provider(rawValue: target_provider)?.title ?? target_provider)" }
-    var stateTitle: String { !valid ? "历史已改变" : (marked ? "已确认发送" : "待确认") }
-    var dateTitle: String {
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = parser.date(from: created_at) else { return created_at }
-        return date.formatted(date: .abbreviated, time: .shortened)
-    }
+    let title: String
+    let project: String
+    let message_count: Int
+    let state: String
+    let artifact_path: String
+    let target_id: String?
+    let target_path: String?
+    var stateTitle: String { state == "imported" ? "已导入" : (state == "exported" ? "待在 Claude 导入" : (state == "prepared" ? "待导入 Codex" : "结果待确认")) }
+    var destination: Provider { Provider(rawValue: target_provider) ?? .gpt }
 }
 
 struct BridgeResponse: Decodable {
+    let conversion: ConversionRecord?
+    let conversions: [ConversionRecord]?
     let ok: Bool
     let error: String?
     let sessions: [NativeSession]?
     let warnings: [String]?
-    let session: NativeSession?
     let source: NativeSession?
-    let target: NativeSession?
     let preview: String?
-    let full_text: String?
-    let text: String?
-    let packet_id: String?
-    let artifact_path: String?
     let characters: Int?
     let message_count: Int?
-    let new_message_count: Int?
-    let source_complete: Bool?
-    let source_provider: String?
-    let target_provider: String?
-    let intent: String?
-    let project: String?
-    let marked: Bool?
-    let valid: Bool?
-    let history: [PacketHistory]?
-    let total: Int?
 }
 
 struct ConverterFailure: LocalizedError {
@@ -141,250 +122,188 @@ final class ConverterModel: ObservableObject {
     @Published var sessions: [NativeSession] = []
     @Published var sourceProvider: Provider = .claude
     @Published var sourcePath = ""
-    @Published var targetPath = ""
-    @Published var sourceMode = "session"
-    @Published var pastedText = ""
     @Published var projectPath = ""
-    @Published var intent = "implement"
-    @Published var packet: BridgeResponse?
+    @Published var preview = ""
+    @Published var messageCount = 0
+    @Published var characterCount = 0
+    @Published var conversion: ConversionRecord?
     @Published var isBusy = false
-    @Published var status = "选择来源对话，或导入已经完成的计划。"
+    @Published var status = "选择一段本机会话，转换后在目标应用中继续。"
     @Published var warning = ""
-    @Published var hasCopied = false
-    @Published var hasMarked = false
-    @Published var copyFullText = false
-    @Published var watchSource = false
-    @Published var autoSwitch = false
     @Published var showConnections = false
     @Published var showHistory = false
-    @Published var history: [PacketHistory] = []
-    @Published var historyWarning = ""
-    @Published var historyTotal = 0
+    @Published var history: [ConversionRecord] = []
     let isDemo: Bool
     private let demoDirectory: URL
-    private var timer: Timer?
-    private var observedStamp: String?
-    private var notifiedPacket = ""
     private let preferences = UserDefaults.standard
+    private var previewGeneration = 0
 
     init(demo: Bool = false) {
         isDemo = demo
         demoDirectory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("dialogue-converter-demo-" + UUID().uuidString)
     }
-    var sourceSessions: [NativeSession] { sessions.filter { $0.provider == sourceProvider.rawValue } }
-    var targetSessions: [NativeSession] { sessions.filter { $0.provider == sourceProvider.other.rawValue } }
+    var sourceSessions: [NativeSession] { sessions.filter { $0.provider == sourceProvider.rawValue && ($0.provider != "claude" || $0.surface == "cowork") } }
     var selectedSource: NativeSession? { sourceSessions.first { $0.path == sourcePath } }
-    var selectedTarget: NativeSession? { targetSessions.first { $0.path == targetPath } }
-    var canPrepare: Bool { !isBusy && (sourceMode == "session" ? !sourcePath.isEmpty : !pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
-    var canCopy: Bool { packet != nil && !isBusy }
-    var canMark: Bool { hasCopied && !hasMarked && !isBusy && packet?.valid != false }
-    var targetProvider: Provider { Provider(rawValue: packet?.target_provider ?? "") ?? sourceProvider.other }
-    var clipboardText: String? { copyFullText ? packet?.full_text : packet?.preview }
+    var canPrepare: Bool { !isBusy && !sourcePath.isEmpty && (sourceProvider == .gpt || !projectPath.isEmpty) }
+    var canImport: Bool { !isBusy && conversion?.destination == .gpt && conversion?.state == "prepared" }
+    var canContinue: Bool { !isBusy && conversion?.state == "imported" }
 
     private func request(_ payload: [String: Any]) async throws -> BridgeResponse {
         var configured = payload
         if isDemo {
             configured["data_dir"] = demoDirectory.appendingPathComponent("state").path
-            configured["claude_home"] = demoDirectory.appendingPathComponent("claude").path
             configured["codex_home"] = demoDirectory.appendingPathComponent("codex").path
+            configured["claude_home"] = demoDirectory.appendingPathComponent("claude-code").path
+            configured["cowork_home"] = demoDirectory.appendingPathComponent("cowork").path
         } else {
-            for provider in Provider.allCases {
-                if let path = preferences.string(forKey: provider.directoryPreference), !path.isEmpty {
-                    configured[provider == .claude ? "claude_home" : "codex_home"] = path
-                }
-            }
+            if let path = preferences.string(forKey: "coworkHome") { configured["cowork_home"] = path }
+            if let path = preferences.string(forKey: "codexHome") { configured["codex_home"] = path }
+        }
+        if let app = applicationURL(.gpt) {
+            configured["codex_binary"] = app.appendingPathComponent("Contents/Resources/codex-cli/bin/codex").path
         }
         return try await BridgeClient.request(configured)
     }
     func start() async {
         if isDemo {
-            sourceMode = "paste"
-            pastedText = "目标：为笔记应用增加全文搜索。\n要求：保留现有数据格式，支持中文，附上使用说明。\n\nClaude 的计划：\n1. 检查笔记读取和列表展示。\n2. 添加本地搜索与清空入口。\n3. 验证中文关键词、空查询和无结果状态。\n4. 汇总修改和验证结果，交回 Claude 审查。"
-            projectPath = "/Projects/Notes"
-            await prepare()
-            status = "示例模式 · 示例内容和交接记录与真实对话隔离。"
-            return
+            do { try makeDemo() } catch { status = error.localizedDescription; return }
         }
-        sourceProvider = Provider(rawValue: preferences.string(forKey: "sourceProvider") ?? "claude") ?? .claude
-        sourcePath = preferences.string(forKey: "sourcePath") ?? ""
-        targetPath = preferences.string(forKey: "targetPath") ?? ""
-        projectPath = preferences.string(forKey: "projectPath") ?? ""
-        intent = preferences.string(forKey: "intent") ?? (sourceProvider == .claude ? "implement" : "review")
         await refresh()
-    }
-    func stop() {
-        timer?.invalidate()
-        if isDemo { try? FileManager.default.removeItem(at: demoDirectory) }
+        if isDemo, let first = sourceSessions.first {
+            sourcePath = first.path
+            projectPath = demoDirectory.appendingPathComponent("project").path
+            await loadPreview()
+        }
     }
     func refresh() async {
         guard !isBusy else { return }
-        isBusy = true; defer { isBusy = false }
+        isBusy = true
         do {
-            let response = try await request(["action": "list"])
-            sessions = response.sessions ?? []
-            if !sourcePath.isEmpty && !sourceSessions.contains(where: { $0.path == sourcePath }) {
-                watchSource = false; setWatching(false); sourcePath = ""; inputsChanged()
-            }
-            if !targetPath.isEmpty && !targetSessions.contains(where: { $0.path == targetPath }) { targetPath = ""; inputsChanged() }
-            if packet == nil { warning = (response.warnings ?? []).joined(separator: "\n") }
-            status = "已读取 \(sourceSessions.count) 段 \(sourceProvider.title) 对话、\(targetSessions.count) 段 \(sourceProvider.other.title) 对话。"
+            let result = try await request(["action": "list"])
+            sessions = result.sessions ?? []
+            warning = (result.warnings ?? []).joined(separator: "\n")
+            let coworkers = sessions.filter { $0.surface == "cowork" }.count
+            let codex = sessions.filter { $0.provider == "gpt" }.count
+            status = "已读取 \(coworkers) 段 Cowork 与 \(codex) 段 Codex 会话。"
         } catch { status = "读取失败：\(error.localizedDescription)" }
-    }
-    private func persist() {
-        guard !isDemo else { return }
-        preferences.set(sourceProvider.rawValue, forKey: "sourceProvider")
-        preferences.set(sourcePath, forKey: "sourcePath"); preferences.set(targetPath, forKey: "targetPath")
-        preferences.set(projectPath, forKey: "projectPath"); preferences.set(intent, forKey: "intent")
-    }
-    func inputsChanged() {
-        packet = nil; hasCopied = false; hasMarked = false; notifiedPacket = ""
-        observedStamp = watchSource ? fileStamp() : nil
-        persist()
-    }
-    func selectSource(_ path: String) {
-        sourcePath = path
-        if let source = selectedSource { projectPath = source.cwd }
-        inputsChanged()
-        if watchSource { setWatching(true) }
-    }
-    func selectTarget(_ path: String) { targetPath = path; inputsChanged() }
-    func setIntent(_ value: String) { intent = value; inputsChanged() }
-    func setPastedText(_ value: String) { pastedText = value; inputsChanged() }
-    func setSourceMode(_ value: String) {
-        sourceMode = value; inputsChanged()
-        if value != "session" { watchSource = false; setWatching(false) }
+        isBusy = false
     }
     func setProvider(_ provider: Provider) {
-        guard provider != sourceProvider else { return }
-        watchSource = false; setWatching(false)
-        sourceProvider = provider; sourcePath = ""; targetPath = ""; pastedText = ""
-        intent = provider == .claude ? "implement" : "review"
-        inputsChanged()
+        guard !isBusy else { return }
+        sourceProvider = provider; sourcePath = ""; clearConversion()
+    }
+    func selectSource(_ path: String) {
+        guard !isBusy else { return }
+        sourcePath = path; clearConversion()
+        if let session = selectedSource, session.provider == "gpt" { projectPath = session.cwd }
+        Task { await loadPreview() }
+    }
+    private func clearConversion() {
+        previewGeneration += 1
+        conversion = nil; preview = ""; messageCount = 0; characterCount = 0; warning = ""
+    }
+    func loadPreview() async {
+        guard !sourcePath.isEmpty else { return }
+        let generation = previewGeneration, path = sourcePath
+        do {
+            let result = try await request(["action": "native_preview", "source_path": path])
+            guard generation == previewGeneration && path == sourcePath else { return }
+            preview = result.preview ?? ""; messageCount = result.message_count ?? 0; characterCount = result.characters ?? 0
+            warning = (result.warnings ?? []).joined(separator: "\n")
+        } catch {
+            if generation == previewGeneration { status = "读取失败：\(error.localizedDescription)" }
+        }
+    }
+    func prepare() async {
+        guard canPrepare else { return }
+        isBusy = true; defer { isBusy = false }
+        do {
+            let result = try await request(["action": "native_prepare", "source_path": sourcePath,
+                                           "target_provider": sourceProvider.other.rawValue, "project": projectPath])
+            conversion = result.conversion; warning = (result.warnings ?? []).joined(separator: "\n")
+            status = sourceProvider == .claude ? "格式已转换。点击“导入 Codex”创建原生会话。" : "Cowork 原生导入包已生成。在 Claude 的“导入与导出”中选择此 ZIP。"
+        } catch { status = "转换失败：\(error.localizedDescription)" }
+    }
+    func importNative() async {
+        guard canImport, let record = conversion else { return }
+        isBusy = true; defer { isBusy = false }
+        status = "正在通过 Codex 原生接口导入完整可见历史…"
+        do {
+            let result = try await request(["action": "native_import", "conversion_id": record.id])
+            conversion = result.conversion; warning = (result.warnings ?? []).joined(separator: "\n")
+            status = "Codex 原生会话已创建并读回验证。可以打开会话继续。"
+        } catch {
+            status = "导入未确认：\(error.localizedDescription)"
+            if let result = try? await request(["action": "native_read", "conversion_id": record.id]) { conversion = result.conversion }
+        }
+    }
+    func verifyNative() async {
+        guard !isBusy, let record = conversion else { return }
+        isBusy = true; defer { isBusy = false }
+        do {
+            let result = try await request(["action": "native_verify", "conversion_id": record.id])
+            conversion = result.conversion; warning = (result.warnings ?? []).joined(separator: "\n")
+            status = result.conversion?.state == "imported" ? "已在 \(record.destination.title) 读回全部转换消息，可以继续任务。" : "当前资料目录尚未匹配到导入记录，请查看提示。"
+        } catch { status = "验证失败：\(error.localizedDescription)" }
     }
     func swap() {
         guard !isBusy else { return }
-        watchSource = false; setWatching(false)
-        let oldSource = sourcePath, oldTarget = targetPath
-        sourceProvider = sourceProvider.other
-        sourcePath = oldTarget; targetPath = oldSource
-        sourceMode = oldTarget.isEmpty ? "paste" : "session"
-        pastedText = ""
-        intent = sourceProvider == .claude ? "implement" : "review"
-        if let source = selectedSource { projectPath = source.cwd }
-        status = oldTarget.isEmpty ? "已交换方向。请选择另一方刚完成的对话，或粘贴结果。" : "已交换两边，准备把新增结果交回原对话。"
-        inputsChanged()
-    }
-    func prepare(automatic: Bool = false) async {
-        guard canPrepare else { return }
-        isBusy = true; defer { isBusy = false }
-        var payload: [String: Any] = ["action": "prepare", "target_provider": sourceProvider.other.rawValue, "source_provider": sourceProvider.rawValue, "intent": intent, "project": projectPath]
-        if sourceMode == "session" { payload["source_path"] = sourcePath } else { payload["text"] = pastedText }
-        if !targetPath.isEmpty { payload["target_path"] = targetPath }
-        do {
-            let response = try await request(payload)
-            packet = response; warning = (response.warnings ?? []).joined(separator: "\n")
-            hasCopied = false; hasMarked = false
-            status = "已转换 \(response.new_message_count ?? 0) 条新增消息，等待交接到 \(targetProvider.title)。"
-            if automatic && autoSwitch && response.source_complete == true && (response.new_message_count ?? 0) > 0 {
-                let identity = (response.source?.id ?? sourcePath) + ":" + String(response.message_count ?? 0) + ":" + targetPath
-                if notifiedPacket != identity { notifiedPacket = identity; copyAndOpen() }
+        if let record = conversion, record.state == "imported", let path = record.target_path {
+            sourceProvider = record.destination; sourcePath = path; projectPath = record.project
+            clearConversion()
+            Task {
+                await refresh()
+                await loadPreview()
             }
-        } catch { status = "转换失败：\(error.localizedDescription)" }
-    }
-    func copy() {
-        guard let text = clipboardText, !text.isEmpty else { return }
-        hasCopied = false
-        NSPasteboard.general.clearContents()
-        guard NSPasteboard.general.setString(text, forType: .string) else { status = "写入剪贴板失败，请重新复制。"; return }
-        hasCopied = true
-        status = "\(copyFullText ? "完整原文" : "交接预览")已复制。在目标对话中按 ⌘V，确认后发送。"
-    }
-    func copyAndOpen() {
-        guard packet != nil else { return }
-        copy()
-        guard hasCopied else { return }
-        guard let url = applicationURL(targetProvider) else {
-            status = "内容已复制；未找到 \(targetProvider.title)，请在“应用连接”中选择，或手动切换到原应用。"
-            showConnections = true; return
-        }
-        let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true
-        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, error in
-            DispatchQueue.main.async {
-                if let error = error { self.status = "打开失败：\(error.localizedDescription)；交接内容仍在剪贴板。" }
-                else { self.status = "已复制并打开 \(url.deletingPathExtension().lastPathComponent)。请在原应用中选择目标对话，粘贴并发送。" }
-            }
-        }
-    }
-    func mark() async {
-        guard let id = packet?.packet_id, canMark else { return }
-        isBusy = true; defer { isBusy = false }
-        do {
-            _ = try await request(["action": "mark", "packet_id": id])
-            hasMarked = true; status = "已记录这次交接。选择“交换两边”可把结果交回。"
-        } catch { status = "记录失败：\(error.localizedDescription)" }
+        } else { setProvider(sourceProvider.other) }
     }
     func loadHistory() async {
         guard !isBusy else { return }
-        showHistory = true; isBusy = true; defer { isBusy = false }
-        do {
-            let response = try await request(["action": "history", "limit": 100])
-            history = response.history ?? []; historyTotal = response.total ?? 0
-            historyWarning = (response.warnings ?? []).joined(separator: "\n")
-        } catch { historyWarning = "读取历史失败：\(error.localizedDescription)" }
+        isBusy = true; showHistory = true; defer { isBusy = false }
+        do { history = try await request(["action": "native_history"]).conversions ?? [] }
+        catch { status = "历史读取失败：\(error.localizedDescription)" }
     }
-    func openHistory(_ entry: PacketHistory) async {
+    func openHistory(_ record: ConversionRecord) {
         guard !isBusy else { return }
-        isBusy = true; defer { isBusy = false }
-        do {
-            let response = try await request(["action": "read_packet", "packet_id": entry.packet_id])
-            watchSource = false; setWatching(false)
-            sourceProvider = Provider(rawValue: response.source_provider ?? "") ?? .claude
-            for session in [response.source, response.target].compactMap({ $0 }) where !sessions.contains(where: { $0.path == session.path }) {
-                sessions.removeAll { $0.id == session.id && $0.provider == session.provider }; sessions.append(session)
-            }
-            sourcePath = response.source?.path ?? ""; targetPath = response.target?.path ?? ""
-            sourceMode = sourcePath.isEmpty ? "paste" : "session"
-            pastedText = response.text ?? ""; projectPath = response.project ?? ""; intent = response.intent ?? "continue"
-            packet = response; hasCopied = false; hasMarked = response.marked == true
-            warning = (response.warnings ?? []).joined(separator: "\n")
-            if response.valid == false { warning += "\n此交接包对应的源历史已改变，可查看和复制；请重新转换后确认新的交接。" }
-            status = "已打开交接历史：\(entry.dateTitle)。"; showHistory = false; persist()
-        } catch { historyWarning = "打开失败：\(error.localizedDescription)" }
-    }
-    func pasteFromClipboard() {
-        guard !isBusy else { return }
-        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { status = "剪贴板里没有文本。"; return }
-        setSourceMode("paste"); pastedText = text; inputsChanged(); status = "已读取剪贴板文本，可以转换。"
+        sourceProvider = Provider(rawValue: record.source.provider) ?? .claude
+        sourcePath = record.source.path; projectPath = record.project
+        clearConversion(); conversion = record; showHistory = false
+        Task { await loadPreview() }
     }
     func importFile() {
         guard !isBusy else { return }
-        let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-        panel.title = "导入对话或计划"; panel.message = "支持文本、Markdown、JSON 和 JSONL。"
+        let panel = NSOpenPanel(); panel.title = "选择本机会话文件"
+        panel.message = "选择 Cowork 的 local_…json，或 Codex 的 rollout…jsonl。"
+        panel.canChooseDirectories = false; panel.allowsMultipleSelection = false; panel.showsHiddenFiles = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        sourcePath = url.path; clearConversion()
+        let generation = previewGeneration
         Task {
-            isBusy = true; defer { isBusy = false }
             do {
-                let response = try await request(["action": "load", "file_path": url.path, "source_provider": sourceProvider.rawValue])
-                watchSource = false; setWatching(false)
-                if let session = response.session, session.provider == sourceProvider.rawValue, url.pathExtension.lowercased() == "jsonl" {
-                    sessions.removeAll { $0.id == session.id && $0.provider == session.provider }; sessions.insert(session, at: 0)
-                    sourceMode = "session"; sourcePath = session.path; projectPath = session.cwd
-                } else { sourceMode = "paste"; pastedText = response.text ?? "" }
-                inputsChanged(); warning = (response.warnings ?? []).joined(separator: "\n"); status = "已导入 \(url.lastPathComponent)。"
-            } catch { status = "导入失败：\(error.localizedDescription)" }
+                let result = try await request(["action": "native_preview", "source_path": url.path])
+                guard generation == previewGeneration && sourcePath == url.path else { return }
+                if let session = result.source {
+                    sessions.removeAll { $0.path == session.path }; sessions.insert(session, at: 0)
+                    sourceProvider = Provider(rawValue: session.provider) ?? .claude
+                    if session.provider == "gpt" { projectPath = session.cwd }
+                }
+                preview = result.preview ?? ""; messageCount = result.message_count ?? 0; characterCount = result.characters ?? 0
+                warning = (result.warnings ?? []).joined(separator: "\n")
+            } catch { if generation == previewGeneration { status = "读取失败：\(error.localizedDescription)" } }
         }
     }
     func chooseProject() {
-        let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
-        panel.title = "选择交接项目"
-        if panel.runModal() == .OK, let url = panel.url { projectPath = url.path; inputsChanged() }
+        let panel = NSOpenPanel(); panel.title = "选择目标项目文件夹"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        projectPath = url.path; conversion = nil
     }
     func applicationURL(_ provider: Provider) -> URL? {
         if let saved = preferences.string(forKey: provider.appPreference), !saved.isEmpty {
             return FileManager.default.fileExists(atPath: saved) ? URL(fileURLWithPath: saved) : nil
         }
-        let identifiers = provider == .claude ? ["com.anthropic.claudefordesktop"] : ["com.openai.codex"]
-        for id in identifiers { if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) { return url } }
+        let identifier = provider == .claude ? "com.anthropic.claudefordesktop" : "com.openai.codex"
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) { return url }
         let names = provider == .claude ? ["Claude-Chinese.app", "Claude.app"] : ["Codex.app", "ChatGPT.app"]
         for directory in [NSHomeDirectory() + "/Applications", "/Applications"] {
             for name in names {
@@ -394,73 +313,77 @@ final class ConverterModel: ObservableObject {
         }
         return nil
     }
-    func chooseApp(_ provider: Provider) {
-        let panel = NSOpenPanel(); panel.title = "选择 \(provider.title) 应用"; panel.canChooseDirectories = false
-        panel.canChooseFiles = true; panel.treatsFilePackagesAsDirectories = false; panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: "/Applications")
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard url.pathExtension == "app", Bundle(url: url)?.executableURL != nil else { status = "请选择有效的 macOS 应用（.app）。"; return }
-        preferences.set(url.path, forKey: provider.appPreference)
-        status = "已连接 \(provider.title)：\(url.lastPathComponent)。"; objectWillChange.send()
+    func openTarget() {
+        guard let record = conversion, let app = applicationURL(record.destination) else { showConnections = true; return }
+        if record.destination == .gpt, record.state == "imported", let id = record.target_id,
+           let url = URL(string: "codex://threads/" + id) {
+            NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, _ in }
+        } else {
+            NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration()) { _, _ in }
+        }
     }
-    func appPath(_ provider: Provider) -> String { applicationURL(provider)?.path ?? preferences.string(forKey: provider.appPreference) ?? "未发现应用，请选择…" }
+    func chooseApp(_ provider: Provider) {
+        let panel = NSOpenPanel(); panel.title = "选择 \(provider.title) 应用"
+        panel.canChooseDirectories = false; panel.treatsFilePackagesAsDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard url.pathExtension == "app", Bundle(url: url)?.executableURL != nil else { status = "请选择有效的 .app 应用。"; return }
+        preferences.set(url.path, forKey: provider.appPreference); objectWillChange.send()
+    }
+    func appPath(_ provider: Provider) -> String { applicationURL(provider)?.path ?? "请选择应用…" }
     func dataPath(_ provider: Provider) -> String {
-        preferences.string(forKey: provider.directoryPreference) ?? ProcessInfo.processInfo.environment[provider == .claude ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"] ?? NSHomeDirectory() + (provider == .claude ? "/.claude" : "/.codex")
+        if provider == .claude { return preferences.string(forKey: "coworkHome") ?? "自动发现 Claude / Claude-3p 的 Cowork 本机记录" }
+        return preferences.string(forKey: "codexHome") ?? ProcessInfo.processInfo.environment["CODEX_HOME"] ?? NSHomeDirectory() + "/.codex"
     }
     func chooseDataDirectory(_ provider: Provider) {
-        let panel = NSOpenPanel(); panel.title = "选择 \(provider.title) 数据目录"; panel.canChooseFiles = false
-        panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.showsHiddenFiles = true
-        panel.message = provider == .claude ? "选择包含 projects 文件夹的目录，通常是 ~/.claude。" : "选择包含 sessions 文件夹的目录，通常是 ~/.codex。"
-        panel.directoryURL = URL(fileURLWithPath: dataPath(provider))
+        let panel = NSOpenPanel(); panel.title = "选择 \(provider.title) 数据目录"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.showsHiddenFiles = true
+        panel.message = provider == .claude ? "选择包含 local-agent-mode-sessions 的 Claude 资料目录。" : "选择包含 sessions 的 Codex 资料目录。"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        preferences.set(url.path, forKey: provider.directoryPreference)
-        watchSource = false; setWatching(false); inputsChanged(); objectWillChange.send()
+        preferences.set(url.path, forKey: provider == .claude ? "coworkHome" : "codexHome"); objectWillChange.send()
         Task { await refresh() }
     }
     func resetDataDirectory(_ provider: Provider) {
-        preferences.removeObject(forKey: provider.directoryPreference)
-        watchSource = false; setWatching(false); inputsChanged(); objectWillChange.send()
+        preferences.removeObject(forKey: provider == .claude ? "coworkHome" : "codexHome"); objectWillChange.send()
         Task { await refresh() }
     }
     func resetApp(_ provider: Provider) { preferences.removeObject(forKey: provider.appPreference); objectWillChange.send() }
-    func showArtifact() { if let path = packet?.artifact_path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } }
+    func showArtifact() { if let record = conversion { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: record.artifact_path)]) } }
     func showStorage() {
         let root = isDemo ? demoDirectory.appendingPathComponent("state") : URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/DialogueConverter")
         NSWorkspace.shared.open(root)
     }
     func exportPacket() {
-        guard !isBusy, let text = packet?.full_text ?? packet?.preview else { return }
-        let panel = NSSavePanel(); panel.title = "保存完整交接文件"; panel.nameFieldStringValue = "对话交接-\(packet?.packet_id?.prefix(8) ?? "参考").md"
+        guard !isBusy, let record = conversion else { return }
+        let panel = NSSavePanel(); panel.title = "另存原生会话文件"
+        panel.nameFieldStringValue = record.destination == .claude ? "Cowork-conversation.zip" : "Claude-native-history.jsonl"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
+            try Data(contentsOf: URL(fileURLWithPath: record.artifact_path)).write(to: url, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            status = "完整交接文件已保存。"
+            status = "原生会话文件已保存。"
         } catch { status = "保存失败：\(error.localizedDescription)" }
     }
-    func setWatching(_ enabled: Bool) {
-        timer?.invalidate(); timer = nil; observedStamp = nil
-        if enabled && sourceMode == "session" && !sourcePath.isEmpty {
-            observedStamp = fileStamp()
-            timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in Task { @MainActor in await self?.watchTick() } }
-            status = "正在等待来源对话的新内容；只在本机文件变化后检查完成状态。"
+    private func makeDemo() throws {
+        let fm = FileManager.default
+        let project = demoDirectory.appendingPathComponent("project")
+        try fm.createDirectory(at: project, withIntermediateDirectories: true)
+        let sid = UUID().uuidString.lowercased(), cli = UUID().uuidString.lowercased()
+        let root = demoDirectory.appendingPathComponent("cowork/local-agent-mode-sessions/demo/demo")
+        let transcript = root.appendingPathComponent("local_" + sid + "/.claude/projects/session/" + cli + ".jsonl")
+        try fm.createDirectory(at: transcript.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let messages = [("user", "为笔记库加一个本机搜索。支持标题和正文，中文关键词可以匹配。先给计划，保持原文件格式。"),
+                        ("assistant", "实施计划\n1. 建立标题和正文索引，原文件保持只读。\n2. 增加关键词搜索与结果定位。\n3. 用中文、空查询和无结果验证。\n验收：返回正确笔记，并显示命中段落。"),
+                        ("user", "按这个计划实施，完成后把结果交回我审查。")]
+        var records: [[String: Any]] = [], parent: Any = NSNull()
+        for (role, text) in messages {
+            let id = UUID().uuidString.lowercased()
+            records.append(["type": role, "uuid": id, "parentUuid": parent, "sessionId": cli,
+                            "message": ["role": role, "content": [["type": "text", "text": text]], "stop_reason": "end_turn"]])
+            parent = id
         }
-    }
-    private func fileStamp() -> String? {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: sourcePath), let modified = attributes[.modificationDate] as? Date, let size = attributes[.size] as? NSNumber else { return nil }
-        return "\(size.int64Value):\(modified.timeIntervalSince1970)"
-    }
-    private func watchTick() async {
-        guard watchSource, !isBusy, !hasCopied || hasMarked, let stamp = fileStamp(), stamp != observedStamp else { return }
-        observedStamp = stamp; isBusy = true
-        do {
-            let response = try await request(["action": "probe", "source_path": sourcePath, "source_provider": sourceProvider.rawValue])
-            isBusy = false
-            if response.source_complete == true { await prepare(automatic: true) }
-            else { status = "来源有新内容，正在等待明确的完成记录。" }
-        } catch {
-            isBusy = false; watchSource = false; setWatching(false)
-            status = "自动跟随已停止：\(error.localizedDescription)"
-        }
+        let data = try records.map { String(data: try JSONSerialization.data(withJSONObject: $0), encoding: .utf8)! }.joined(separator: "\n") + "\n"
+        try data.write(to: transcript, atomically: true, encoding: .utf8)
+        let metadata: [String: Any] = ["sessionId": "local_" + sid, "cliSessionId": cli, "title": "笔记库本机搜索计划"]
+        try JSONSerialization.data(withJSONObject: metadata).write(to: root.appendingPathComponent("local_" + sid + ".json"))
     }
 }

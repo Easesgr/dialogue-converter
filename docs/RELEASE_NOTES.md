@@ -1,23 +1,26 @@
-# 对话转换器 0.3.0
+# 对话转换器 0.4.0 · 原生会话转换预览
 
-原生 macOS 应用：在 Claude 与 Codex / GPT 之间转换交接资料，对话继续在原应用进行。
+本版将应用主流程改为 **Claude Cowork ↔ Codex 桌面端的原生会话格式转换**。后续对话和模型执行保留在原应用。
 
-## 本版功能
+## 功能
 
-- 双向转换、明确目标会话的增量交接、发送后的手动确认。
-- 交接历史、重新复制、完整原文复制和 Markdown 导出。
-- 应用及数据目录配置、会话筛选、项目选择和快捷键。
-- 来源完成后准备交接，可选复制并切换应用。
-- 内置转换运行环境，无需 Python / Homebrew / Xcode。
+- Cowork 本机任务自动发现，跨压缩边界恢复可见历史。
+- 逐条保留用户 / 助手角色、顺序和全文。
+- 通过 Codex 原生接口创建会话并读回核对。
+- Codex 转换为 Cowork 原生历史 ZIP，由 Claude 原生向导导入。
+- 转换记录、重复检测、导入结果检查和选择目标会话交回。
+- 独立 macOS 应用，内置运行环境；无需额外安装 Python。
 
-## 下载与安装
+## 验证与限制
 
-macOS 14+。M 系列 Mac 选择 `arm64`，Intel Mac 选择 `x86_64`。
+33 项单元测试通过。隔离环境使用已安装 Codex 内置程序验证了原生导入、长文本 / 角色读回、重复导入保护、中断后的再次核对、反向 ZIP 转换和原生会话恢复；没有发起模型执行。合成导入会话已在 Codex 桌面窗口显示用户与助手历史。
 
-打开 DMG，将“对话转换器.app”拖到 Applications。也可下载 ZIP。
+**实验预览。** 本机用户已确认 Cowork 合成 ZIP 导入成功，并能看到历史；自动扫描当前资料目录尚未匹配到该测试记录。两端导入后的模型接续未验证。Claude 必须提供可用的“导入与导出”入口，其可用性取决于版本和账号配置；导入由 Claude 原生向导完成。
 
-**本版公开包使用临时签名，未通过 Apple 公证。** 首次被 macOS 阻止时，尝试打开后进入“系统设置 → 隐私与安全性 → 仍要打开”。无需关闭系统安全保护。受管理的 Mac 可能需要管理员批准。
+只转换本机可见文字。工具执行、附件、文件授权、私有推理、缓存和模型状态不迁移。导入历史占用目标模型上下文；不能保证跨模型效果或速度相同。
 
-Claude Code 与 Codex 的本机 JSONL 会话可以直接读取；Claude Desktop / Web / Cowork 与 ChatGPT 对话使用复制或导入。转换器会激活目标应用，目标对话的选择和发送仍需在原应用完成。私有推理、工具输出和二进制附件不转换。
+## 安装
 
-Conversion is local and makes no model calls. Chats stay in their original applications. macOS 14+, Apple Silicon and Intel; Chinese interface. Public assets are ad hoc signed and not notarized. Review the README for supported formats and context limits.
+macOS 14+，按芯片下载 ARM64 或 Intel DMG，将应用拖入 Applications。ZIP 与 SHA256 校验文件同时提供。
+
+公开包为临时签名，**没有 Apple 公证**。首次打开被阻止时，到“系统设置 → 隐私与安全性 → 仍要打开”核对名称后确认。

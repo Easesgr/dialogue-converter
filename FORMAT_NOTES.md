@@ -1,46 +1,53 @@
-# Native transcript bridge
+# Native formats and compatibility
 
-bridge.py is a Python standard-library command-line bridge. It reads one UTF-8 JSON request from stdin, emits one response with ok: true or ok: false, and exits 1 on failure. It never starts a model, contacts a service, sends a message, controls a native app, or writes native app data.
+## Scope
 
-## Request interface
+0.4.0 converts visible user and assistant text between **local Claude Cowork tasks and local Codex desktop sessions**. This is an experimental adapter for versioned native formats. It creates a fresh destination snapshot; it does not update a running thread or synchronize every turn.
 
-- list: returns sessions and warnings. Each session has id, provider, title, cwd, path, updated_at, complete, and message_count. Up to 100 recent file candidates per provider are inspected; child-agent sessions are excluded.
-- probe: accepts source_path and optional source_provider; returns source, source_complete, and warnings. It reads only a bounded head/tail for large JSONL, creates no packet, and does not save delivery state.
-- load: accepts file_path and optional source_provider; returns visible formatted text, native session when identifiable, and warnings.
-- prepare: accepts either source_path or text, optional source_provider, optional target_path, required target_provider (claude or gpt), intent (implement, review, or continue), and optional project. Returns packet_id, preview, full_text, source, target, message_count, new_message_count, characters, artifact_path, warnings, and source_complete. characters counts Python Unicode code points in the preview; it is not a token estimate.
-- mark: accepts packet_id after the user confirms delivery in the native app. Returns marked, already_marked, and delivered_until. Preparing, copying, or opening a native app must never call this action automatically.
-- status: accepts packet_id; returns persisted acknowledgement, generation validity, source/target metadata, artifact path, and delivered cursor. valid reflects the saved generation; source history is revalidated by prepare/mark.
+## Cowork sources
 
-message_count: -1 means the large transcript was sampled and the full count is unknown. Show “待加载” or omit the count. Full source loading and preparation return exact counts. Native metadata IDs take precedence; native JSONL with no metadata ID may use a trailing canonical UUID from its filename. An unrecognisable filename without native metadata ID cannot identify a target. Pair identity is provider plus native ID, so moving a native file to the archive does not silently bind another session.
+Discovery checks ~/Library/Application Support/Claude-3p/local-agent-mode-sessions and the equivalent Claude profile, or an explicitly selected root. Session metadata lives at <account>/<org>/local_<uuid>.json. The adapter validates the session and CLI UUIDs, then resolves the engine JSONL in full-ID, bare-ID or eight-character session directories. Resolved transcripts must stay inside the session metadata parent.
 
-## Formats and filtering
+cliSessionId selects .claude/projects/<project>/<cliSessionId>.jsonl. Metadata cwd is an internal output folder, so it is not used as a shared Codex project. The user selects a real local project directory.
 
-Codex rollouts: session_meta, response_item visible user/assistant message records, legacy event_msg user/agent message records, current event_msg/item_completed UserMessage/AgentMessage, and CLI thread.started / item.completed streams. Mirrored event/response messages are deduplicated, while repeated user requests are preserved.
+The last main-chain user/assistant leaf selects the active UUID chain. logicalParentUuid crosses compact_boundary records to preserve pre-compaction visible messages. Cycle/missing-link errors stop conversion. isMeta, isCompactSummary, sidechains, private thinking and tool blocks are excluded. Audit files and HMACs are not engine history and are not read or generated.
 
-Claude Code: user / assistant envelope records with message.content; visible text blocks are retained, message blocks sharing a native message ID are combined. Sidechains, metadata-only messages, tool results, tool use, thinking, and API internals are excluded.
+## Codex sources
 
-Other imports: plain UTF-8 text/Markdown, messages arrays, {messages:[...]}, and {dialogue:{messages:[...]}} converter exports. Structured imports allow only visible text and user/assistant/context roles. No system/developer records, private reasoning, tool schemas/outputs, compaction replacements, or encrypted content are transferred. Invalid JSONL lines are skipped with a warning and force incomplete status; malformed JSON-shaped input is never downgraded into raw text that could leak filtered fields. Bracketed Markdown speaker labels remain plain text.
+Local rollout JSONL is discovered in sessions and archived_sessions, with titles from session_index.jsonl. The visible adapter supports response message items and mirrored user/agent events. Adjacent cross-representation echoes are deduplicated; repeated user requests are retained. The exact native importer marker <EXTERNAL SESSION IMPORTED> is omitted when it is an assistant message during native conversion.
 
-Completion uses explicit final-answer phases or successful completion events for Codex; Claude requires an assistant end_turn / stop_sequence without API error markers. New input, ongoing reasoning/tool calls, starts, aborts, errors, malformed lines, or concurrent source writes clear completion. No idle-time guess is used.
+System/developer items, tool calls/results, reasoning, encrypted state and compaction replacements are excluded. External/cloud-only conversations and legacy formats without accessible rollout files are unsupported.
 
-## Incremental handoffs
+## Codex destination
 
-With target_path, each source/target pair has its own delivery cursor. All pending messages remain pending until explicit mark. A subsequent preparation includes any messages still unacknowledged. Overlapping acknowledgements advance only the contiguous delivered range, so marking an older packet cannot move the cursor backward or skip a gap. History snapshots use byte hashes plus visible-message fingerprints; edited or truncated sources reset the pair with a warning and invalidate old-generation packets. Acknowledgement checks the source prefix again.
+The installed desktop app's bundled codex app-server --stdio implements externalAgentConfig/import with SESSIONS. Conversion stages a fresh Claude-compatible transcript under a private staging HOME layout. An explicit CODEX_HOME selects the target while the staging HOME prevents detection from reading unrelated real Claude profiles.
 
-Without target_path, each preparation creates a distinct unbound new-target scope. It never guesses which native target received the prompt. After creating a new native chat, select its actual transcript for subsequent pair-specific handoffs; the first explicitly paired transfer may repeat context because the earlier unbound transfer cannot be safely inferred.
+Only session import is requested: no configuration, skills, MCP server, hook, permission or credential migration. No turn/start request is sent. After import completion, thread/read verifies the ordered visible roles and exact text. The app opens the resulting native thread ID. The importer adds its own visible import marker.
 
-The first preview prioritizes all user/context messages and the latest substantive assistant reply; the complete visible reference includes all pending messages. Long previews include excerpts and an explicit exact local-file reference. If the target app cannot read local files, the user must attach that file or paste the full reference; the converter does not claim the target received a referenced file merely because a prompt was copied. An exact converter prompt that was marked delivered is omitted only when returning to its original source session, avoiding a recursive handoff echo. Transfers to a third target retain that context.
+Tested locally with bundled codex-cli 0.162.0-alpha.17.2. The protocol is experimental; an older or changed version may reject it. Raw thread/resume.history is not used to manufacture history. The isolated integration check also invokes normal thread/resume by persisted ID without starting a model turn.
 
-State and packets live in ~/Library/Application Support/DialogueConverter. Directories use 0700 and files 0600. Files are written with unique temporary names, fsync, atomic rename, and directory fsync; a process lock serializes source snapshot reads and state mutations. State failures stop delivery changes rather than pretending success.
+## Cowork destination
 
-## Handoff history and protocol settings
+A ZIP contains exactly:
 
-`history` returns the latest 100 packet metadata records by default (limit 1–500), including direction, created time, validity and explicit acknowledgement. It does not change delivery progress. `read_packet` reopens a packet and verifies the full artifact's digest before returning copyable content. A packet whose history generation has changed can still be viewed but cannot acknowledge the new generation. Old version 0.2 packets are supported using their persisted source identities.
+~~~text
+claude-3p-export.json
+local-agent-mode-sessions/<fresh-account-uuid>/<fresh-org-uuid>/local_<fresh-id>.json
+local-agent-mode-sessions/<fresh-account-uuid>/<fresh-org-uuid>/local_<fresh-id>/.claude/projects/session/<fresh-cli-id>.jsonl
+~~~
 
-The CLI accepts optional `data_dir`, `codex_home` and `claude_home` directory paths. Defaults remain the application-support directory, `CODEX_HOME` or `~/.codex`, and `CLAUDE_CONFIG_DIR` or `~/.claude`. The native application exposes provider directory settings; its demo mode uses an isolated temporary data directory.
+Manifest kind claude-desktop-export, version 1, counts {cowork:1,code:0,chat:0}. Metadata contains only the session and CLI IDs, title, creation/activity timestamps and archive flag. Engine messages have unique UUIDs and a consistent parent chain; every visible message retains its role and full text.
 
-## Known limits
+Import uses Claude's own **Import & Export** wizard. The application does not write into the live Claude profile, call internal renderer IPC externally, copy audit records, or mark imported sessions as already consented. Claude supplies destination storage, registration, resume consent and permissions. The converter can subsequently locate the CLI ID in local Cowork metadata and verify all original messages as an exact prefix.
 
-No complete readable Claude Desktop/Cowork transcript was discovered in the local application data. Automatic native discovery supports Claude Code and Codex files; Claude Desktop/Cowork requires an exported or pasted visible transcript. Plain pasted text has no reliable native session identity or completion signal. Changed pasted content is treated as a different import rather than risking a cursor against unrelated content.
+The package layout has been checked against the installed Claude 2.31226.1 native importer and tested for role/text roundtrips. A local user confirmed successful synthetic ZIP import with visible history. Automatic lookup in the current local profile has not matched that test record. **Resumed model execution remains unverified in either application.** Availability is conditional on Claude's provider/account settings and version. First-party and third-party builds may expose different import routes.
 
-Large JSONL listing/probes are bounded; preparing/loading the actual source still streams the entire source file to obtain complete visible messages and a verifiable snapshot. Images/audio and non-text attachments are not converted. Native applications retain ownership of their original conversations and tool access.
+## Receipts and failure handling
+
+Each conversion stores a versioned receipt and complete visible messages. An identical content/provider/project fingerprint reuses the receipt. Changed history creates a new independent destination snapshot. Already imported Codex conversions return the original target ID.
+
+An interrupted or failed import may have persisted a destination before reporting failure. Such receipts are marked uncertain and cannot blindly retry. Once Codex returns a target ID, it is saved before readback; native_verify can read that existing target again and verify its exact original message prefix without importing again. If no target ID was received, check the destination application first. Source files are never modified. Repeated roundtrips carry the whole visible history and may consume a substantial destination context.
+
+## Legacy
+
+The 0.3.0 bridge text/acknowledgement protocol remains readable for compatibility and regression checks, but the 0.4.0 application uses the native_* actions. Legacy prompt copying and link references are not the native conversion workflow.

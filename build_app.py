@@ -29,7 +29,7 @@ def run(*args, **kwargs):
 def version():
     value = (ROOT / "VERSION").read_text().strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", value):
-        raise ValueError("VERSION must contain a release version such as 0.3.0.")
+        raise ValueError("VERSION must contain a release version such as 0.4.0.")
     return value
 
 

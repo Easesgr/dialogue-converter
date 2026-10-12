@@ -40,7 +40,7 @@ Every build invokes:
 python3 packaging/verify_app.py 'dist/对话转换器.app' --arch arm64
 ```
 
-Use `x86_64` on Intel. Verification checks all native binaries, system deployment targets, external dependencies and deep signatures. It then copies the application to a new path containing spaces and runs its bundled helper with an empty HOME, minimal PATH, and invalid external Python paths. Synthetic conversations verify discovery, conversion, explicit acknowledgement, increments, reverse handoff, history and failure responses. No real user sessions or model calls are needed.
+Use `x86_64` on Intel. Verification checks all native binaries, system deployment targets, external dependencies and deep signatures. It then copies the application to a new path containing spaces and runs its bundled helper with an empty HOME, minimal PATH, and invalid external Python paths. Synthetic conversations verify discovery, native Cowork ZIP conversion, full visible text, conversion receipts, legacy compatibility and failure responses. No real user sessions or model calls are needed.
 
 For manual UI review:
 
@@ -48,6 +48,15 @@ For manual UI review:
 open -n 'dist/对话转换器.app' --args --demo
 ```
 
-Demo mode uses synthetic text and temporary isolated converter storage. It does not list real conversations or persist conversation selections. Quit the demo before starting the normal application. The native UI still offers copy/open actions; sending stays in the original app.
+Demo mode uses synthetic text and temporary isolated converter storage. It does not list real conversations or persist conversation selections. Quit the demo before starting the normal application. The native UI offers conversion/import actions. Demo Codex imports use an isolated CODEX_HOME, so their thread IDs do not belong to the regular desktop profile.
 
 See [RELEASE.md](RELEASE.md) for signing and publication.
+
+## Installed Codex integration check
+
+~~~bash
+python3 scripts/check_native_import.py
+# or: python3 scripts/check_native_import.py --codex-binary /path/to/codex
+~~~
+
+Uses synthetic multi-turn long text with isolated HOME and CODEX_HOME. Verifies the native importer, exact roles/text, idempotence, reverse Cowork ZIP and normal persisted-thread resume. Does not send turn/start or call a model. This check needs a compatible installed Codex program and is not part of CI runners without that app. Cowork GUI import needs a separately configured Claude desktop; it is not proven by package-format tests.
